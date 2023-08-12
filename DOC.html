@@ -1,0 +1,257 @@
+
+OZY's CAPTIVE PORTAL FOR RADIUS/MySQL authentication
+Written by Orsiris de Jong
+Last revision: 26 May 2016
+Changelog:
+26 May 2016:
+- New procedure for pfSense 2.3 final and post 2.3 releases repos
+- Added steps for mysql 5.7
+1 Introduction
+pfSense-cp-auth-onestep is a project that aims to provide a captive portal interface for pfSense 2.x (currently tested on 2.2.x, 2.3-beta, 2.3, 2.31) that doesn't require the creation of a user account.
+In fact, when a user registers, it creates the RADIUS user account and then logs in with that account.
+A demo can be found at the following address:http://pfcp.netpower.fr
+Initial work based on the excellent work of khan: https://forum.pfsense.org/index.php?topic=57260.0
+2 Preparation of pfSense
+In order to work, pfSense needs the following packages: FreeRADIUS, Cron.
+Also, some upstream packages are required in order to work.
+First we need to fetch some upstream packages:
+Additional steps for pfSense 2.3
+The repository management has changed in pfSense 2.3, and by default the FreeBSD repository is disabled.
+You must edit the file /usr/local/etc/pkg/repos/pfSense.conf and set the following value:
+
+FreeBSD: { enabled: yes }
+
+On pfSense 2.3 final and later, you must also edit file /usr/local/etc/pkg/repos/FreeBSD.conf and set the following value:
+
+FreeBSD: { enabled: yes }
+
+ATTENTION: Once the packages are installed with pkg command, please set this value to 'no' again so updates won't interfere with pfSense normal functionality.
+Installation of packages:
+
+pkg
+pkg update
+pkg install nano git
+
+If your pkg doesn't find the packages, you may need to reinit the pkg database with;
+
+rm -f /var/db/pkg/*.sqlite
+
+After this, pkg update shall rebuild th e pkg database.
+2.1 Installation of MySQL
+Although MySQL should be installed on a separate machine, it's convenient to have a single pfSense box doing the whole authentication.
+Installation of MySQL isn't supported by pfSense, so you'll have to redo the following steps after every update.
+2.1.1 pfSense 2.2 steps
+MySQL installation
+
+pkg install mysql56-server
+pkg install compat8x-amd64
+
+PHP support
+
+touch /etc/php_dynamodules/mysql
+/etc/rc.php_ini_setup
+
+The following command should output mysql and mysqlnd.
+
+php -m | grep mysql
+
+2.1.2 pfSense 2.3 steps
+MySQL installation
+
+pkg install mysql56-server
+pkg install compat9x-amd64
+pkg install php56-mysql
+
+PHP support
+The following command should output mysql and mysqlnd.
+
+php -m | grep mysql
+
+2.1.3 Optional steps if mysql57 is used
+Edit file /usr/local/my.cnf in order to bind mysql only to loopback interface.
+
+[mysqld]
+bind-address = 127.0.0.1
+
+MySQL 5.7 does not allow defaut date 0000-00-00 00:00:00 format anymore.
+In order to be able to use the FreeRADIUS schema, edit file /usr/local/my.cnf (or create /var/db/mysql/my.cnf with):
+
+[mysqld]
+sql-mode=allow_invalid_dates
+
+2.1.4 Common steps
+We need to allow the MySQL service to start.
+
+echo 'mysql_enable="YES"' > /etc/rc.conf
+
+Also, pfSense won't start services unless their name finishes by “.sh”
+
+mv /usr/local/etc/rc.d/mysql-server /usr/local/etc/rc.d/mysql-server.sh
+
+2.1.5 MySQL startup fix
+For whatever, pfSense won't start MySQL sometimes.
+In order to fix this, create the following file /usr/local/bin/mysql_relaunch.sh
+
+#!/usr/bin/env sh  
+
+service /mysql-server.sh status > /dev/null
+if [ $? != 0 ]; then
+        service mysql-server.sh start
+fi
+
+Render the file executable
+
+chmod +x /usr/local/bin/mysql_relaunch.sh
+
+Install the cron package and add the following entry:
+
+*/1 * * * * root /usr/local/bin/mysql_relaunch.sh
+
+After this, we may launch the mysql service
+
+service mysql-server.sh start
+
+Secure your installation by running the following command and change your root password
+
+/usr/local/bin/mysql_secure_installation
+
+Optionnaly, you may create the following password file /root/.my.cnf like this
+
+[client]
+password="YourMySQLrootPassword"
+
+2.2 FreeRADIUS setup
+2.2.1 FreeRADIUS installation
+Install the FreeRADIUS2 package via System > Packages > Available
+In Services > FreeRADIUS > Users
+Add a user called: testu
+Set it's password: testp
+in Services > FreeRADIUS > NAS / Clients
+Add a NAS user:
+IP: 127.0.0.1
+Client Shortname: tester
+Shared Secret: SuperTest (replace this with a good password)
+In Services > FreeRADIUS > Interface
+Add the interface the RADIUS server should listen on: 127.0.0.1
+You can now check in Status > System Logs that the server is active
+
+Sep 29 14:54:50	radiusd[10330]: Loaded virtual server <default>
+Sep 29 14:54:50	radiusd[13493]: Ready to process requests.
+
+Connect to pfSense via ssh or console and check if FreeRADIUS authenticates (replace SuperTest with your Shared Secret):
+
+radtest testu testp 127.0.0.1:1812 0 SuperTest
+
+The answer should look like:
+
+Sending Access-Request of id 108 to 127.0.0.1 port 1812
+        User-Name = "testu"
+        User-Password = "testp"
+        NAS-IP-Address = 192.168.1.1
+        NAS-Port = 0
+        Message-Authenticator = 0x00000000000000000000000000000000
+rad_recv: Access-Accept packet from host 127.0.0.1 port 1812, id=108, length=20
+
+Check authentication in Status > System Logs
+
+Sep 29 15:04:51	radiusd[22223]: Login OK: [testu] (from client pfSense port 0)
+
+#TIP: See https://doc.pfsense.org/index.php/Testing_FreeRADIUS for tuning and troubleshooting
+2.2.2 MySQL FreeRADIUS integration
+First we need to create the RADIUS database. Launch the “mysql” program. If you didn't create the /root/.my.cnf password file, launch “mysql -p” and execute the following statements:
+
+CREATE DATABASE  `radius`;
+exit
+
+We also have to get a copy of the sql files needed for the captive portal.
+You can fetch them via wget at http://netpower.fr/sites/default/files/2016-03/pfSense-cp-auth-onestep.gz or directly via git:
+
+cd /root
+git clone https://github.com/deajan/pfSense-cp-auth-onestep
+cd /root/pfSense-cp-auth-onestep/sql
+
+We need to integrate every .sql file into the radius database. Please execute the admin.sql file at last because it contains definitions for the other files. Add “-p” to myql if you don't have created the password file.
+Before running those commands, modify the admin.sql file in order to replace the default password 'radpass'. (Use vi or nano if installed).
+
+mysql radius < cui.sql
+mysql radius < nas.sql
+mysql radius < radippool.sql
+mysql radius < schema.sql
+mysql radius < wimax.sql
+mysql radius < reg_users.sql
+mysql radius < admin.sql
+
+Activate SQL support in Services > FreeRADIUS > SQL:
+Enable SQL Support: Enable
+Enable SQL Authorization: Enable
+Enable SQL Accounting: Enable
+Enable SQL Session: Enable
+Enable SQL Post-Auth: Enable
+Server IP Address –> 127.0.0.1
+Server Port –> 3306
+Server Database -> radius
+Server User -> radius
+Server Password -> radpass (replace with your database password).
+MySQL authentication test
+Execute the following command (replace SuperTest with your Shared Secret):
+
+radtest testu testp 127.0.0.1:1812 0 SuperTest
+
+The radpostauth table should contain the authentication info:
+
+mysql -p -e "SELECT * FROM radpostauth;" radius
+
++----+----------+-------+---------------+---------------------+
+| id | username | pass  | reply         | authdate            |
++----+----------+-------+---------------+---------------------+
+|  1 | testu    | testp | Access-Accept | 2015-09-29 15:13:24 |
++----+----------+-------+---------------+---------------------+
+
+2.3 Enable captive portal
+2.3.1 Setup
+Grab a copy of the pfSense-pfcp-auth-onestep files via github or via the following link http://netpower.fr/sites/default/files/2016-03/pfSense-cp-auth-onestep.gz
+Uncompress the file and edit captiveportal-config.php to meet your settings, especially the database password.
+Create a new zone in Services > Captive Portal . Example “PUBLICWIFI”
+In Services > Captive Portal > File Manager, upload all the files from pfSense-pfcp-auth-onestep beginning with “captiveportal-*”
+The following files need to be uploaded:
+
+captiveportal-bootstrap.min.css
+captiveportal-bootstrap.min.js
+captiveprotal-jquery.validate.js
+captiveportal-jquery-1.11.3.min.js
+captiveportal-background.jpg
+captiveportal-sidelogo.png
+captiveportal-check_readio_sheet.png
+captiveportal-termsofuse.html
+captiveportal-config.php
+
+image: 0_home_badmin_Documents_pfsense-pfcp-auth-onestep_captiveportal_files.png
+#TIP: I had trouble with uploading the files in pfSense 2.2.6. After every 3 files, I had to restart WebConfigurator via ssh.
+We Can now enable the captive portal on the LAN interface or whatever interface you need.
+We also need to activate RADIUS authentication:
+IP: 127.0.0.1
+Port: 1812
+Shared Secret: SuperTest (or your Shared Secret)
+Radius Protocol: PAP
+Account Check:
+Send RADIUS accounting packets: Enable
+Port: 1813
+Accounting updates: stop/start accounting (FreeRADIUS if available)
+RADIUS NAS IP attribue: LAN IP (or whatever interface you selected)
+Portal page contesnts: Upload file ozy-captive.php
+Redirection URL: Whatever you'd like, example: http://www.google.com
+2.3.2 Testing
+Once enabled, you can open a browser and enter any domain. You should end on the captive portal page.
+You may access directly to the captive portal via http://[pfSenseIP]:8002
+#TIP: Your computer should use DHCP and use the pfSense IP as DNS server or the redirection won't work.
+If the redirection still doesn't work, check that the DNS Resolver service is running without the forwarding mode.
+Also, if your computer already has the domain in DNS cache, you may have to flush dns cache.
+On Linux:
+
+service nscd restart
+
+On Windows:
+
+ipconfig /flushdns
+
+At least, close and reopen your browser so it would make a new DNS query.
